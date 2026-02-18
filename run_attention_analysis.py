@@ -164,6 +164,10 @@ def run_analysis(
     task_output = output_dir / task_name
     task_output.mkdir(parents=True, exist_ok=True)
 
+    # Head-specific plots go in a subfolder
+    head_output = task_output / f"L{plot_layer}_H{plot_head}"
+    head_output.mkdir(parents=True, exist_ok=True)
+
     for idx, transcript in enumerate(transcripts):
         example_id = transcript["example_id"]
         thinking = transcript["thinking"]
@@ -233,7 +237,7 @@ def run_analysis(
         kurt = compute_kurtosis(vert_scores)
         all_kurtosis.append(kurt)
 
-        # ---- Plot 1: Single attention heatmap ----
+        # ---- Plot 1: Single attention heatmap (head-specific → subfolder) ----
         if plot_layer in result["attention_weights"]:
             avg_mat = get_avg_attention_matrix(result, plot_layer, plot_head, sentence_boundaries)
             all_avg_matrices.append(avg_mat)
@@ -242,17 +246,17 @@ def run_analysis(
             plot_single_attention_heatmap(
                 avg_mat,
                 title=f"{example_id} — L{plot_layer} H{plot_head}",
-                output_path=task_output / f"heatmap_{example_id}_L{plot_layer}_H{plot_head}.png",
+                output_path=head_output / f"heatmap_{example_id}.png",
             )
 
-        # ---- Plot 3: Vertical scores for one layer ----
+        # ---- Plot 3: Vertical scores for one layer (head-specific → subfolder) ----
         if plot_layer < vert_scores.shape[0]:
             plot_vertical_scores_layer(
                 vert_scores[plot_layer],
                 layer=plot_layer,
                 highlight_head=plot_head,
                 title=f"{example_id} — Layer {plot_layer}",
-                output_path=task_output / f"vert_scores_{example_id}_L{plot_layer}.png",
+                output_path=head_output / f"vert_scores_{example_id}.png",
             )
 
         # ---- Plot 4: Suppression KL heatmap (if not skipped) ----
@@ -290,14 +294,14 @@ def run_analysis(
     receiver_heads = get_top_k_receiver_heads(stacked_kurt, top_k=min(top_k, 20))
     print(f"  Top receiver heads: {receiver_heads[:5].tolist()} ...")
 
-    # ---- Plot 2: Grid of attention matrices ----
+    # ---- Plot 2: Grid of attention matrices (head-specific → subfolder) ----
     if len(all_avg_matrices) >= 2:
         plot_attention_grid(
             all_avg_matrices,
             all_titles,
             suptitle=f"Attention matrices — L{plot_layer} H{plot_head}",
             n_cols=min(4, len(all_avg_matrices)),
-            output_path=task_output / "attention_grid.png",
+            output_path=head_output / "attention_grid.png",
         )
 
     # ---- Plot 3 (aggregate): Top-k receiver heads overlay ----
