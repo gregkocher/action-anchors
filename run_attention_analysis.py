@@ -8,7 +8,8 @@ adapted from thought-anchors.
 Usage:
     uv run python run_attention_analysis.py --task gsm8k --n-examples 5
     uv run python run_attention_analysis.py --task gsm8k --n-examples 3 --skip-suppression
-    uv run python run_attention_analysis.py --task gsm8k --layer 0.8 --head 5
+    uv run python run_attention_analysis.py --task gsm8k --layers 0.5 --heads 0
+    uv run python run_attention_analysis.py --task gsm8k --layers 0.0,0.5,0.8 --heads 0,1,2,3
 """
 
 import argparse
@@ -123,10 +124,15 @@ def run_analysis(
     output_dir: Path,
     top_k: int = 20,
     proximity_ignore: int = 4,
-    layer_frac: float = 0.5,
-    head: int = 0,
+    layer_fracs: list[float] | None = None,
+    heads: list[int] | None = None,
 ):
     """Run the full attention analysis pipeline."""
+
+    if layer_fracs is None:
+        layer_fracs = [0.5]
+    if heads is None:
+        heads = [0]
 
     # Load config
     with open("action_anchors/config.yaml") as f:
@@ -149,24 +155,34 @@ def run_analysis(
     print(f"\nLoading {model_name} with eager attention...")
     model, tokenizer = load_model(model_name, float32=False, device_map="auto")
 
-    # Resolve layer from fraction
-    plot_layer = _fraction_to_layer(layer_frac)
-    plot_head = head
-    print(f"Per-example plots: layer {plot_layer} (frac={layer_frac:.2f}), head {plot_head}")
+    # Resolve layers from fractions
+    plot_layers = [_fraction_to_layer(f) for f in layer_fracs]
+    plot_heads = heads
+
+    # Build all (layer, head) combos for per-example plots
+    layer_head_combos = [(l, h) for l in plot_layers for h in plot_heads]
+    print(f"Per-example plots: {len(layer_head_combos)} (layer, head) combos:")
+    for l, h in layer_head_combos:
+        frac = l / (N_LAYERS - 1) if N_LAYERS > 1 else 0
+        print(f"  L{l} (frac={frac:.2f}) H{h}")
 
     # Storage for cross-example aggregation
     all_kurtosis: list[np.ndarray] = []
     all_vert_scores: list[np.ndarray] = []
     all_sentences: list[list[str]] = []
-    all_avg_matrices: list[np.ndarray] = []
+    # Per (layer, head) combo: list of avg matrices and titles
+    all_avg_matrices: dict[tuple[int, int], list[np.ndarray]] = {c: [] for c in layer_head_combos}
     all_titles: list[str] = []
 
     task_output = output_dir / task_name
     task_output.mkdir(parents=True, exist_ok=True)
 
-    # Head-specific plots go in a subfolder
-    head_output = task_output / f"L{plot_layer}_H{plot_head}"
-    head_output.mkdir(parents=True, exist_ok=True)
+    # Create subfolders for each (layer, head) combo
+    head_outputs: dict[tuple[int, int], Path] = {}
+    for l, h in layer_head_combos:
+        sub = task_output / f"L{l}_H{h}"
+        sub.mkdir(parents=True, exist_ok=True)
+        head_outputs[(l, h)] = sub
 
     for idx, transcript in enumerate(transcripts):
         example_id = transcript["example_id"]
@@ -237,27 +253,32 @@ def run_analysis(
         kurt = compute_kurtosis(vert_scores)
         all_kurtosis.append(kurt)
 
-        # ---- Plot 1: Single attention heatmap (head-specific → subfolder) ----
-        if plot_layer in result["attention_weights"]:
-            avg_mat = get_avg_attention_matrix(result, plot_layer, plot_head, sentence_boundaries)
-            all_avg_matrices.append(avg_mat)
-            all_titles.append(f"{example_id}")
+        all_titles.append(f"{example_id}")
 
-            plot_single_attention_heatmap(
-                avg_mat,
-                title=f"{example_id} — L{plot_layer} H{plot_head}",
-                output_path=head_output / f"heatmap_{example_id}.png",
-            )
+        # ---- Per (layer, head) combo plots ----
+        for (pl, ph) in layer_head_combos:
+            ho = head_outputs[(pl, ph)]
 
-        # ---- Plot 3: Vertical scores for one layer (head-specific → subfolder) ----
-        if plot_layer < vert_scores.shape[0]:
-            plot_vertical_scores_layer(
-                vert_scores[plot_layer],
-                layer=plot_layer,
-                highlight_head=plot_head,
-                title=f"{example_id} — Layer {plot_layer}",
-                output_path=head_output / f"vert_scores_{example_id}.png",
-            )
+            # Plot 1: Single attention heatmap (head-specific → subfolder)
+            if pl in result["attention_weights"]:
+                avg_mat = get_avg_attention_matrix(result, pl, ph, sentence_boundaries)
+                all_avg_matrices[(pl, ph)].append(avg_mat)
+
+                plot_single_attention_heatmap(
+                    avg_mat,
+                    title=f"{example_id} — L{pl} H{ph}",
+                    output_path=ho / f"heatmap_{example_id}.png",
+                )
+
+            # Plot 3: Vertical scores for one layer (head-specific → subfolder)
+            if pl < vert_scores.shape[0]:
+                plot_vertical_scores_layer(
+                    vert_scores[pl],
+                    layer=pl,
+                    highlight_head=ph,
+                    title=f"{example_id} — Layer {pl}",
+                    output_path=ho / f"vert_scores_{example_id}.png",
+                )
 
         # ---- Plot 4: Suppression KL heatmap (if not skipped) ----
         if not skip_suppression:
@@ -295,14 +316,16 @@ def run_analysis(
     print(f"  Top receiver heads: {receiver_heads[:5].tolist()} ...")
 
     # ---- Plot 2: Grid of attention matrices (head-specific → subfolder) ----
-    if len(all_avg_matrices) >= 2:
-        plot_attention_grid(
-            all_avg_matrices,
-            all_titles,
-            suptitle=f"Attention matrices — L{plot_layer} H{plot_head}",
-            n_cols=min(4, len(all_avg_matrices)),
-            output_path=head_output / "attention_grid.png",
-        )
+    for (pl, ph) in layer_head_combos:
+        matrices = all_avg_matrices[(pl, ph)]
+        if len(matrices) >= 2:
+            plot_attention_grid(
+                matrices,
+                all_titles,
+                suptitle=f"Attention matrices — L{pl} H{ph}",
+                n_cols=min(4, len(matrices)),
+                output_path=head_outputs[(pl, ph)] / "attention_grid.png",
+            )
 
     # ---- Plot 3 (aggregate): Top-k receiver heads overlay ----
     if len(all_vert_scores) > 0 and len(receiver_heads) > 0:
@@ -394,21 +417,26 @@ def main():
         help="Nearby sentences to ignore for vertical scores (default: 4)",
     )
     parser.add_argument(
-        "--layer",
-        type=float,
-        default=0.5,
-        help="Layer to use for per-example plots, as a fraction in [0.0, 1.0]. "
+        "--layers",
+        type=str,
+        default="0.5",
+        help="Comma-separated layer fractions in [0.0, 1.0] for per-example plots. "
              "0.0 = first layer, 0.5 = middle, 0.8 = ~80%% depth, 1.0 = last layer. "
-             "(default: 0.5)",
+             "Example: --layers 0.0,0.5,0.8  (default: 0.5)",
     )
     parser.add_argument(
-        "--head",
-        type=int,
-        default=0,
-        help="Attention head index for per-example plots (default: 0)",
+        "--heads",
+        type=str,
+        default="0",
+        help="Comma-separated attention head indices for per-example plots. "
+             "Example: --heads 0,1,2,3  (default: 0)",
     )
 
     args = parser.parse_args()
+
+    # Parse comma-separated values
+    layer_fracs = [float(x.strip()) for x in args.layers.split(",")]
+    head_indices = [int(x.strip()) for x in args.heads.split(",")]
 
     run_analysis(
         task_name=args.task,
@@ -417,8 +445,8 @@ def main():
         output_dir=Path(args.output_dir),
         top_k=args.top_k,
         proximity_ignore=args.proximity_ignore,
-        layer_frac=args.layer,
-        head=args.head,
+        layer_fracs=layer_fracs,
+        heads=head_indices,
     )
 
 
