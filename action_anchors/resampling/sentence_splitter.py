@@ -29,10 +29,10 @@ def split_cot_into_sentences(thinking_text: str) -> SentenceSplit:
 
         # Try within-line splitting for long lines
         # Pattern: sentence-ending punctuation followed by space + uppercase letter
-        # Negative lookbehind: don't split after a single digit (decimals like 3.14)
-        # or after common abbreviation prefixes
+        # Negative lookbehinds: don't split after common abbreviation prefixes
+        # Note: decimals like 3.14 are already safe because the lookahead
+        # requires \s+[A-Z] after the period, which excludes digits.
         parts = re.split(
-            r"(?<!\d)"  # not after digit (avoids 3.14)
             r"(?<!\be\.g)"  # not after e.g
             r"(?<!\bi\.e)"  # not after i.e
             r"(?<!\bvs)"  # not after vs

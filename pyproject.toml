@@ -12,6 +12,10 @@ dependencies = [
     "pyyaml",
     "datasets",
     "vllm>=0.8.0",
+    "torch",
+    "scipy",
+    "tqdm",
+    "accelerate",
 ]
 
 [build-system]
