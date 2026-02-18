@@ -129,10 +129,11 @@ def run_analysis(
 ):
     """Run the full attention analysis pipeline."""
 
+    # None means "all"
     if layer_fracs is None:
-        layer_fracs = [0.5]
+        layer_fracs = [i / (N_LAYERS - 1) for i in range(N_LAYERS)]
     if heads is None:
-        heads = [0]
+        heads = list(range(N_HEADS))
 
     # Load config
     with open("action_anchors/config.yaml") as f:
@@ -419,24 +420,33 @@ def main():
     parser.add_argument(
         "--layers",
         type=str,
-        default="0.5",
+        default=None,
         help="Comma-separated layer fractions in [0.0, 1.0] for per-example plots. "
              "0.0 = first layer, 0.5 = middle, 0.8 = ~80%% depth, 1.0 = last layer. "
-             "Example: --layers 0.0,0.5,0.8  (default: 0.5)",
+             "Example: --layers 0.0,0.5,0.8  "
+             "If omitted, plots ALL layers (0 through {}).".format(N_LAYERS - 1),
     )
     parser.add_argument(
         "--heads",
         type=str,
-        default="0",
+        default=None,
         help="Comma-separated attention head indices for per-example plots. "
-             "Example: --heads 0,1,2,3  (default: 0)",
+             "Example: --heads 0,1,2,3  "
+             "If omitted, plots ALL heads (0 through {}).".format(N_HEADS - 1),
     )
 
     args = parser.parse_args()
 
-    # Parse comma-separated values
-    layer_fracs = [float(x.strip()) for x in args.layers.split(",")]
-    head_indices = [int(x.strip()) for x in args.heads.split(",")]
+    # Parse comma-separated values, or None → all
+    if args.layers is not None:
+        layer_fracs: list[float] | None = [float(x.strip()) for x in args.layers.split(",")]
+    else:
+        layer_fracs = None  # signals "all layers"
+
+    if args.heads is not None:
+        head_indices: list[int] | None = [int(x.strip()) for x in args.heads.split(",")]
+    else:
+        head_indices = None  # signals "all heads"
 
     run_analysis(
         task_name=args.task,
