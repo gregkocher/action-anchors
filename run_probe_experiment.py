@@ -74,8 +74,15 @@ def reconstruct_full_text(
 # Phase 1: Generate rollouts with vLLM
 # =============================================================================
 
-def phase1_generate(n_examples: int) -> list[dict]:
-    """Generate one rollout per question with vLLM and save transcripts."""
+def phase1_generate(n_examples: int, rollouts_per_question: int = 1) -> list[dict]:
+    """Generate rollouts with vLLM and save transcripts.
+
+    Args:
+        n_examples: Number of questions to use.
+        rollouts_per_question: Number of rollouts to generate per question.
+            With n_examples=1000 and rollouts_per_question=10, this produces
+            up to 10,000 transcripts (minus parse errors).
+    """
     from vllm import LLM, SamplingParams
 
     with open("action_anchors/config.yaml") as f:
@@ -95,7 +102,7 @@ def phase1_generate(n_examples: int) -> list[dict]:
     # Load task and examples
     task = GSM8KCalculatorTask(config)
     examples = task.get_examples()[:n_examples]
-    print(f"Using {len(examples)} questions")
+    print(f"Using {len(examples)} questions, {rollouts_per_question} rollout(s) each")
 
     # Build prompts
     builder = PromptBuilder(model_name)
@@ -117,14 +124,15 @@ def phase1_generate(n_examples: int) -> list[dict]:
     )
 
     params = SamplingParams(
-        n=1,
+        n=rollouts_per_question,
         max_tokens=config["collection"]["max_new_tokens"],
         temperature=config["collection"]["temperature"],
         top_p=config["collection"]["top_p"],
         stop=["<|im_end|>"],
     )
 
-    print(f"Generating {len(prompts)} rollouts...")
+    total_rollouts = len(prompts) * rollouts_per_question
+    print(f"Generating {total_rollouts} rollouts ({len(prompts)} prompts × {rollouts_per_question})...")
     all_outputs = llm.generate(prompts, params)
 
     # Parse and build transcripts
@@ -133,35 +141,44 @@ def phase1_generate(n_examples: int) -> list[dict]:
     n_skipped_empty = 0
 
     for ex, output in zip(examples, all_outputs):
-        raw_output = output.outputs[0].text
-        parsed = parse_generation(raw_output)
+        for rollout_idx, completion in enumerate(output.outputs):
+            raw_output = completion.text
+            parsed = parse_generation(raw_output)
 
-        if parsed.parse_error:
-            n_skipped_parse += 1
-            continue
-        if not parsed.thinking.strip():
-            n_skipped_empty += 1
-            continue
+            if parsed.parse_error:
+                n_skipped_parse += 1
+                continue
+            if not parsed.thinking.strip():
+                n_skipped_empty += 1
+                continue
 
-        split = split_cot_into_sentences(parsed.thinking)
-        has_tool_call = len(parsed.tool_calls) > 0
+            split = split_cot_into_sentences(parsed.thinking)
+            has_tool_call = len(parsed.tool_calls) > 0
 
-        transcript = {
-            "example_id": ex.id,
-            "question": ex.question,
-            "raw_output": raw_output,
-            "thinking": parsed.thinking,
-            "n_sentences": len(split.sentences),
-            "tool_calls": [
-                {"name": tc.name, "arguments": tc.arguments, "raw": tc.raw_text}
-                for tc in parsed.tool_calls
-            ],
-            "final_answer": parsed.final_answer,
-            "ground_truth": ex.ground_truth,
-            "metadata": ex.metadata,
-            "has_tool_call": has_tool_call,
-        }
-        transcripts.append(transcript)
+            # Unique ID: original question id + rollout index
+            if rollouts_per_question == 1:
+                example_id = ex.id
+            else:
+                example_id = f"{ex.id}_r{rollout_idx}"
+
+            transcript = {
+                "example_id": example_id,
+                "question_id": ex.id,
+                "rollout_index": rollout_idx,
+                "question": ex.question,
+                "raw_output": raw_output,
+                "thinking": parsed.thinking,
+                "n_sentences": len(split.sentences),
+                "tool_calls": [
+                    {"name": tc.name, "arguments": tc.arguments, "raw": tc.raw_text}
+                    for tc in parsed.tool_calls
+                ],
+                "final_answer": parsed.final_answer,
+                "ground_truth": ex.ground_truth,
+                "metadata": ex.metadata,
+                "has_tool_call": has_tool_call,
+            }
+            transcripts.append(transcript)
 
     # Save
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -170,8 +187,9 @@ def phase1_generate(n_examples: int) -> list[dict]:
 
     n_tool = sum(1 for t in transcripts if t["has_tool_call"])
     n_no_tool = len(transcripts) - n_tool
+    n_questions = len(set(t["question_id"] for t in transcripts))
     print(f"\nPhase 1 complete:")
-    print(f"  Saved {len(transcripts)} transcripts to {TRANSCRIPTS_FILE}")
+    print(f"  Saved {len(transcripts)} transcripts from {n_questions} questions to {TRANSCRIPTS_FILE}")
     print(f"  {n_tool} with tool call, {n_no_tool} without")
     if n_skipped_parse:
         print(f"  Skipped {n_skipped_parse} (parse error)")
@@ -969,6 +987,13 @@ def main():
         help="Number of questions to use (default: 100)",
     )
     parser.add_argument(
+        "--rollouts-per-question",
+        type=int,
+        default=1,
+        help="Number of rollouts per question (default: 1). "
+             "E.g. --n-examples 1000 --rollouts-per-question 10 yields up to 10k transcripts.",
+    )
+    parser.add_argument(
         "--skip-generate",
         action="store_true",
         help="Skip Phase 1: reuse existing probe_transcripts_gsm8k.json",
@@ -997,7 +1022,7 @@ def main():
         print("\n" + "=" * 60)
         print("Phase 1: Generating rollouts with vLLM")
         print("=" * 60)
-        phase1_generate(args.n_examples)
+        phase1_generate(args.n_examples, args.rollouts_per_question)
     else:
         print("\nPhase 1 skipped (--skip-generate)")
         if not TRANSCRIPTS_FILE.exists():
