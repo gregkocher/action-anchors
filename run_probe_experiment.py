@@ -525,20 +525,40 @@ def phase3_train_probes(test_size: float = 0.2) -> tuple[list[dict], dict]:
     else:
         print("\nPhase 3 complete: no probes trained (insufficient data)")
 
-    # Print summary table of best layer per position
-    print("\n  Position         | Best Layer | Test AUC | N examples")
-    print("  -----------------|------------|----------|----------")
+    # Build and save summary table of best layer per position
+    summary_lines = []
+    header = f"{'Position':<18s} | {'Best Layer':>10s} | {'Test AUC':>8s} | {'Train AUC':>9s} | {'N examples':>10s} | {'N test':>6s}"
+    separator = "-" * len(header)
+    summary_lines.append(header)
+    summary_lines.append(separator)
+
     seen_positions = set()
     for r in all_results:
         pos = r["position"]
         if pos in seen_positions:
             continue
-        # Find best layer for this position
         pos_results = [x for x in all_results if x["position"] == pos]
         best = max(pos_results, key=lambda x: x["auc_roc_test"] if not np.isnan(x["auc_roc_test"]) else -1)
         n_total = best["n_train"] + best["n_test"]
-        print(f"  {pos:<17s} | {best['layer']:>10d} | {best['auc_roc_test']:>8.3f} | {n_total:>10d}")
+        line = (
+            f"{pos:<18s} | {best['layer']:>10d} | {best['auc_roc_test']:>8.3f} | "
+            f"{best['auc_roc_train']:>9.3f} | {n_total:>10d} | {best['n_test']:>6d}"
+        )
+        summary_lines.append(line)
         seen_positions.add(pos)
+
+    summary_text = "\n".join(summary_lines)
+
+    # Print to console
+    print()
+    for line in summary_lines:
+        print(f"  {line}")
+
+    # Save to file
+    summary_path = OUTPUT_DIR / "probe_summary_table.txt"
+    with open(summary_path, "w") as f:
+        f.write(summary_text + "\n")
+    print(f"\n  Summary table saved to {summary_path}")
 
     return all_results, all_weights
 
@@ -575,7 +595,8 @@ def phase4_plots():
 
     # 4a: AUC-ROC line plots
     print("  Generating AUC-ROC plots...")
-    _plot_auc_curves(all_results, plt)
+    _plot_auc_by_layer(all_results, plt)
+    _plot_auc_by_position(all_results, plt)
 
     # 4b: Cosine similarity heatmaps
     print("  Generating cosine similarity heatmaps...")
@@ -592,11 +613,10 @@ def phase4_plots():
     print(f"\nPhase 4 complete: all plots saved to {PLOTS_DIR}")
 
 
-def _plot_auc_curves(results: list[dict], plt):
-    """Plot AUC-ROC vs layer, one line per position (train and test)."""
+def _plot_auc_by_layer(results: list[dict], plt):
+    """Plot AUC-ROC vs layer (x-axis), one line per position."""
     positions = sorted(set(r["position"] for r in results), key=position_sort_key)
 
-    # Use a colormap that works for many lines
     n_pos = len(positions)
     if n_pos <= 10:
         cmap = plt.cm.tab10
@@ -606,8 +626,8 @@ def _plot_auc_curves(results: list[dict], plt):
         cmap = plt.cm.viridis
 
     for metric, title_prefix, filename in [
-        ("auc_roc_train", "Training", "probe_auc_train.png"),
-        ("auc_roc_test", "Test", "probe_auc_test.png"),
+        ("auc_roc_train", "Training", "probe_auc_train_by_layer.png"),
+        ("auc_roc_test", "Test", "probe_auc_test_by_layer.png"),
     ]:
         fig, ax = plt.subplots(figsize=(14, 8))
 
@@ -623,7 +643,9 @@ def _plot_auc_curves(results: list[dict], plt):
 
         ax.set_xlabel("Layer", fontsize=12)
         ax.set_ylabel("AUC-ROC", fontsize=12)
-        ax.set_title(f"{title_prefix} AUC-ROC by Layer and Position", fontsize=14)
+        ax.set_title(
+            f"{title_prefix} AUC-ROC vs Layer (each line = one position)", fontsize=14
+        )
         ax.set_xlim(0, N_LAYERS - 1)
         ax.set_ylim(0.0, 1.05)
         ax.axhline(y=0.5, color="gray", linestyle="--", alpha=0.5, label="Chance")
@@ -631,16 +653,65 @@ def _plot_auc_curves(results: list[dict], plt):
         if n_pos <= 20:
             ax.legend(fontsize=7, ncol=2, loc="upper left")
         else:
-            # Colorbar for many positions
             sm = plt.cm.ScalarMappable(
                 cmap=cmap, norm=plt.Normalize(0, n_pos - 1)
             )
             sm.set_array([])
             cbar = fig.colorbar(sm, ax=ax, label="Position index")
-            key_ticks = [0, n_pos // 4, n_pos // 2, 3 * n_pos // 4, n_pos - 1]
-            key_ticks = sorted(set(key_ticks))
+            key_ticks = sorted(set([0, n_pos // 4, n_pos // 2, 3 * n_pos // 4, n_pos - 1]))
             cbar.set_ticks(key_ticks)
             cbar.set_ticklabels([positions[t] for t in key_ticks])
+
+        plt.tight_layout()
+        plt.savefig(PLOTS_DIR / filename, dpi=150)
+        plt.close()
+        print(f"    Saved {filename}")
+
+
+def _plot_auc_by_position(results: list[dict], plt):
+    """Plot AUC-ROC vs position (x-axis), one line per layer."""
+    positions = sorted(set(r["position"] for r in results), key=position_sort_key)
+    layers = sorted(set(r["layer"] for r in results))
+
+    # Build position index for x-axis
+    pos_to_x = {p: i for i, p in enumerate(positions)}
+
+    # Colormap: gradient over layers
+    n_layers = len(layers)
+    cmap = plt.cm.viridis
+
+    for metric, title_prefix, filename in [
+        ("auc_roc_train", "Training", "probe_auc_train_by_position.png"),
+        ("auc_roc_test", "Test", "probe_auc_test_by_position.png"),
+    ]:
+        fig, ax = plt.subplots(figsize=(16, 8))
+
+        for layer in layers:
+            layer_results = sorted(
+                [r for r in results if r["layer"] == layer],
+                key=lambda r: position_sort_key(r["position"]),
+            )
+            x_vals = [pos_to_x[r["position"]] for r in layer_results]
+            aucs = [r[metric] for r in layer_results]
+            color = cmap(layer / max(n_layers - 1, 1))
+            ax.plot(x_vals, aucs, color=color, alpha=0.5, linewidth=1.0)
+
+        ax.set_xlabel("Position", fontsize=12)
+        ax.set_ylabel("AUC-ROC", fontsize=12)
+        ax.set_title(
+            f"{title_prefix} AUC-ROC vs Position (each line = one layer)", fontsize=14
+        )
+        ax.set_xticks(range(len(positions)))
+        ax.set_xticklabels(positions, rotation=90, fontsize=6)
+        ax.set_ylim(0.0, 1.05)
+        ax.axhline(y=0.5, color="gray", linestyle="--", alpha=0.5)
+
+        # Colorbar for layers
+        sm = plt.cm.ScalarMappable(
+            cmap=cmap, norm=plt.Normalize(0, max(layers))
+        )
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="Layer")
 
         plt.tight_layout()
         plt.savefig(PLOTS_DIR / filename, dpi=150)
