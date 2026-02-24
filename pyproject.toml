@@ -16,6 +16,8 @@ dependencies = [
     "scipy",
     "tqdm",
     "accelerate",
+    "scikit-learn",
+    "umap-learn",
 ]
 
 [build-system]
